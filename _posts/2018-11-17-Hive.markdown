@@ -1,0 +1,127 @@
+---
+layout: post
+title:  手动搬运数据到hive
+date:   2018-11-17 16:43:00 +0800
+categories: hive
+---
+
+# 手动搬运数据到hive
+
+大体分为6个步骤
+
+- 从数据库中导出数据
+- 上传到Linux中
+- 上传hdfs中
+- 建立外表
+- 建立orc表
+- 导入数据
+
+本次以下表为例
+
+``` sql
+CREATE TABLE t_user(
+    id NUMBER(10,0),
+    name VARCHAR2(10),
+    sex CHAR(1),
+    job VARCHAR2(20)
+);
+```
+
+## 1. [从数据库中导出数据](https://jingyan.baidu.com/article/6dad507528e6cfa123e36e99.html)
+
+以Oracle为例，使用PL/SQL将查询出结果后导出为csv格式，
+
+``` sql
+SELECT * FROM t_user;
+```
+
+![1](http://ww1.sinaimg.cn/large/7ec23716gy1fxfynxqw3hj206s04o3yw.jpg)
+
+执行完后该文件实际上应该是以逗号隔开的文本文件，可以用记事本打开验证以下。
+
+## 2. 上传到Linux
+
+此处用可以用[MobaXterm](https://mobaxterm.mobatek.net/)工具连接到Linux，用[lrzsz](https://www.cnblogs.com/mkdlf/p/7223767.html)命令上传文件。
+
+## 3. 上传到hdfs
+
+此时上传的csv文件中如果第一行是列名，需要[删掉第一行](https://blog.csdn.net/lanfengchalan/article/details/70244056)
+
+```shell
+sed -i '1d' filename
+```
+
+[sed](http://man.linuxde.net/sed)是一种流编辑器，`-i`表示就地编辑文件，编辑后会保存到文件中，否则不会保存结果，`1d`表示删掉第一行。
+
+![1](http://ww1.sinaimg.cn/large/7ec23716gy1fxfylnr0flj20aq078dfx.jpg)
+
+之后再用以下命令上传到hdfs中。
+
+```shell
+hdfs dfs -put <local_file> <hdfs_path>
+```
+
+该命令表示将本地文件`local_file`上传到`hdfs_path`路径下
+
+## 4. [建立外表](https://blog.csdn.net/zhouleilei/article/details/8686194)
+
+```sql
+CREATE EXTERNAL TABLE t_e_user(
+    id NUMERIC(10,0),
+    name VARCHAR(10),
+    sez VARCHAR(1),
+    job VARCHAR(20)
+)
+row format delimited
+fields terminated by ','
+--lines terminated by '\n'
+stored as textfile
+location '<hdfs_path>';
+```
+
+`EXTERNAL`表示建立外表，hive指挥创建元数据，但不会存储真正的数据，而是关联到`location`指定的路径下
+
+`row format delimited`表示指定一行的界定符。
+
+`fields terminated by ','`表示字段以逗号隔开。
+
+`lines terminated by '\n'`表示行与行之间用`\n`隔开。
+
+`stored as textfile`表示使用普通文本格式进行存储。
+
+`location '<hdfs_path>'`表示指定数据在hdfs中的路径，制定后hive会扫描改路径下的文件，不能指定单独的数据文件。
+
+但是此时从PL/SQL导出的数据有中文乱码问题，PKSQL导出的文件为GBK，hive默认的编码格式为utf-8，需要修改外表编码格式。
+
+```sql
+ALTER TABLE t_e_user SET SERDEPROPERTIES ('serialization.encoding'='GBK');
+```
+
+## 5.建立orc表
+
+```sql
+create table t_user(
+    id NUMERIC(10,0),
+    name VARCHAR(10),
+    sez VARCHAR(1),
+    job VARCHAR(20)
+)
+clustered by (id) into 4 bucket
+stored as orc
+tblproperties('transactional'='true');
+```
+
+`clustered by (id) into 4 bucket`表示根据id的hash值将保存数据的文件分成4个
+
+`stored as orc`表示文件的格式为[orc](https://orc.apache.org/)
+
+`tblproperties('transactional'='true')`表示开启事务，可以使用ACID操作
+
+## 6.导入数据
+
+终于到了最后一步。
+
+```sql
+insert into t_user
+select * from t_e_user;
+```
